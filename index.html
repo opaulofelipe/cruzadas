@@ -2,10 +2,10 @@
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
   <meta name="theme-color" content="#111111" />
   <title>Cruzadas</title>
-  <link rel="stylesheet" href="./style.css?v=1" />
+  <link rel="stylesheet" href="./style.css?v=3" />
 </head>
 <body>
   <main class="app-shell">
@@ -49,11 +49,13 @@
           <div id="board" class="board" role="grid" aria-label="Palavras cruzadas"></div>
         </div>
 
-        <div class="active-clue panel" aria-live="polite">
-          <div>
+        <div id="active-clue" class="active-clue panel" aria-live="polite" aria-label="Pista selecionada">
+          <button id="previous-clue" class="clue-nav" type="button" aria-label="Pista anterior">‹</button>
+          <div class="active-clue-copy">
             <span id="active-clue-label" class="clue-kicker">Selecione uma palavra</span>
             <p id="active-clue-text">Toque em uma casa branca para começar.</p>
           </div>
+          <button id="next-clue" class="clue-nav" type="button" aria-label="Próxima pista">›</button>
         </div>
 
         <div class="controls">
@@ -104,6 +106,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="./app.js?v=1"></script>
+  <script type="module" src="./app.js?v=3"></script>
 </body>
 </html>
