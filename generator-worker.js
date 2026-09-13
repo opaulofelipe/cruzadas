@@ -81,7 +81,11 @@ function normalizeWords(rawWords) {
 }
 
 function normalizeAnswer(value) {
-  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z]/g, "");
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "");
 }
 
 function buildLetterFrequency(words) {
@@ -304,12 +308,29 @@ function finalizeCandidate(state) {
     else if (wordCrossings === 1) wordsWithOneCrossing++;
   }
 
-  const compactness = occupied / (boundsArea(state.bounds) || state.size * state.size);
+  const finalRows = state.bounds ? state.bounds.maxRow - state.bounds.minRow + 1 : state.size;
+  const finalCols = state.bounds ? state.bounds.maxCol - state.bounds.minCol + 1 : state.size;
+  const finalArea = Math.max(1, finalRows * finalCols);
+  const compactness = occupied / finalArea;
   const checkedRatio = totalLetters ? (crossings * 2) / totalLetters : 0;
   const orientationDiff = Math.abs(state.acrossCount - state.downCount);
-  const blackRatio = 1 - occupied / (state.size * state.size);
+  const blackRatio = 1 - occupied / finalArea;
+  const aspectRatio = Math.max(finalRows, finalCols) / Math.max(1, Math.min(finalRows, finalCols));
 
-  return { ...state, occupied, crossings, compactness, checkedRatio, orientationDiff, blackRatio, wordsWithTwoOrMoreCrossings, wordsWithOneCrossing };
+  return {
+    ...state,
+    occupied,
+    crossings,
+    compactness,
+    checkedRatio,
+    orientationDiff,
+    blackRatio,
+    aspectRatio,
+    finalRows,
+    finalCols,
+    wordsWithTwoOrMoreCrossings,
+    wordsWithOneCrossing
+  };
 }
 
 function compareCandidates(a, b) {
@@ -318,11 +339,15 @@ function compareCandidates(a, b) {
   if (a.wordsWithTwoOrMoreCrossings !== b.wordsWithTwoOrMoreCrossings) return a.wordsWithTwoOrMoreCrossings - b.wordsWithTwoOrMoreCrossings;
   if (Math.abs(a.checkedRatio - b.checkedRatio) > 0.01) return a.checkedRatio - b.checkedRatio;
   if (a.crossings !== b.crossings) return a.crossings - b.crossings;
+  if (Math.abs(a.aspectRatio - b.aspectRatio) > 0.08) return b.aspectRatio - a.aspectRatio;
   return a.compactness - b.compactness;
 }
 
 function isExcellent(candidate, targetWords) {
-  return candidate.placements.length >= targetWords && candidate.orientationDiff <= 2 && candidate.checkedRatio >= 0.32;
+  return candidate.placements.length >= targetWords
+    && candidate.orientationDiff <= 2
+    && candidate.checkedRatio >= 0.32
+    && candidate.aspectRatio <= 1.45;
 }
 
 function validateCandidate(candidate) {
@@ -359,25 +384,51 @@ function validateCandidate(candidate) {
 }
 
 function buildPuzzle(candidate) {
-  const { size, grid, memberships, placements } = candidate;
-  const cells = [];
+  const { size, grid, memberships, placements, bounds } = candidate;
+  if (!bounds) return null;
 
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      const index = indexOf(size, r, c);
-      const solution = grid[index] || "";
-      cells.push({ row: r, col: c, block: !solution, solution, slotIds: solution ? [...memberships[index]] : [] });
+  const minRow = bounds.minRow;
+  const maxRow = bounds.maxRow;
+  const minCol = bounds.minCol;
+  const maxCol = bounds.maxCol;
+  const rows = maxRow - minRow + 1;
+  const cols = maxCol - minCol + 1;
+  const cells = [];
+  const oldToNew = new Map();
+
+  for (let r = minRow; r <= maxRow; r++) {
+    for (let c = minCol; c <= maxCol; c++) {
+      const oldIndex = indexOf(size, r, c);
+      const newRow = r - minRow;
+      const newCol = c - minCol;
+      const newIndex = newRow * cols + newCol;
+      oldToNew.set(oldIndex, newIndex);
+      const solution = grid[oldIndex] || "";
+      cells.push({
+        row: newRow,
+        col: newCol,
+        block: !solution,
+        solution,
+        slotIds: solution ? [...memberships[oldIndex]] : []
+      });
     }
   }
 
+  const remappedPlacements = placements.map(placement => ({
+    ...placement,
+    row: placement.row - minRow,
+    col: placement.col - minCol,
+    cells: placement.cells.map(oldIndex => oldToNew.get(oldIndex))
+  }));
+
   const startMap = new Map();
-  for (const placement of placements) {
+  for (const placement of remappedPlacements) {
     const start = placement.cells[0];
     if (!startMap.has(start)) startMap.set(start, null);
   }
   [...startMap.keys()].sort((a, b) => a - b).forEach((cellIndex, i) => startMap.set(cellIndex, i + 1));
 
-  const slots = placements.map(placement => ({
+  const slots = remappedPlacements.map(placement => ({
     id: placement.id,
     number: startMap.get(placement.cells[0]),
     direction: placement.direction,
@@ -391,20 +442,29 @@ function buildPuzzle(candidate) {
     }
   }));
 
-  slots.sort((a, b) => a.number !== b.number ? a.number - b.number : (a.direction === "across" ? -1 : 1));
+  slots.sort((a, b) =>
+    a.number !== b.number
+      ? a.number - b.number
+      : (a.direction === "across" ? -1 : 1)
+  );
+
+  const finalArea = rows * cols;
+  const blackRatio = 1 - candidate.occupied / Math.max(1, finalArea);
 
   return {
-    rows: size,
-    cols: size,
+    rows,
+    cols,
     cells,
     slots,
-    blackRatio: candidate.blackRatio,
+    blackRatio,
     stats: {
       across: candidate.acrossCount,
       down: candidate.downCount,
       crossings: candidate.crossings,
       checkedRatio: candidate.checkedRatio,
-      compactness: candidate.compactness
+      compactness: candidate.compactness,
+      workspace: `${size}x${size}`,
+      finalSize: `${cols}x${rows}`
     }
   };
 }
@@ -448,7 +508,9 @@ function expandBounds(bounds, row, col, endRow, endCol) {
 }
 
 function boundsArea(bounds) {
-  return bounds ? (bounds.maxRow - bounds.minRow + 1) * (bounds.maxCol - bounds.minCol + 1) : 0;
+  return bounds
+    ? (bounds.maxRow - bounds.minRow + 1) * (bounds.maxCol - bounds.minCol + 1)
+    : 0;
 }
 
 function insertTop(list, candidate, limit) {
@@ -490,7 +552,7 @@ function mulberry32(seed) {
 }
 
 function formatProgress(attemptNumber, candidate) {
-  return `Tentativa ${attemptNumber}: ${candidate.placements.length} palavras (${candidate.acrossCount}H/${candidate.downCount}V), ${candidate.crossings} cruzamentos em ${candidate.size}×${candidate.size}.`;
+  return `Tentativa ${attemptNumber}: ${candidate.placements.length} palavras (${candidate.acrossCount}H/${candidate.downCount}V), ${candidate.crossings} cruzamentos; área útil ${candidate.finalCols}x${candidate.finalRows}.`;
 }
 
 function postProgress(message) {
