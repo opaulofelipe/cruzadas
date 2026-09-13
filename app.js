@@ -20,12 +20,16 @@ const els = {
   errorMessage: document.querySelector("#error-message"),
   retry: document.querySelector("#retry"),
   newGame: document.querySelector("#new-game"),
+  boardWrap: document.querySelector("#board-wrap"),
   board: document.querySelector("#board"),
   progress: document.querySelector("#progress"),
   wordCount: document.querySelector("#word-count"),
   blackRate: document.querySelector("#black-rate"),
+  activeClue: document.querySelector("#active-clue"),
   activeClueLabel: document.querySelector("#active-clue-label"),
   activeClueText: document.querySelector("#active-clue-text"),
+  previousClue: document.querySelector("#previous-clue"),
+  nextClue: document.querySelector("#next-clue"),
   acrossClues: document.querySelector("#across-clues"),
   downClues: document.querySelector("#down-clues"),
   check: document.querySelector("#check"),
@@ -46,6 +50,7 @@ let selectedCell = null;
 let activeSlotId = null;
 let checks = new Map();
 let generating = false;
+let maxViewportHeight = window.visualViewport?.height || window.innerHeight;
 
 init();
 
@@ -76,6 +81,8 @@ function bindEvents() {
   els.check.addEventListener("click", checkPuzzle);
   els.clearWord.addEventListener("click", clearActiveWord);
   els.revealWord.addEventListener("click", revealActiveWord);
+  els.previousClue?.addEventListener("click", () => navigateClue(-1));
+  els.nextClue?.addEventListener("click", () => navigateClue(1));
 
   els.mobileInput.addEventListener("input", event => {
     const raw = event.target.value || "";
@@ -136,6 +143,10 @@ function bindEvents() {
       }
     }
   });
+
+  window.visualViewport?.addEventListener("resize", syncKeyboardMode);
+  window.visualViewport?.addEventListener("scroll", syncKeyboardMode);
+  window.addEventListener("resize", syncKeyboardMode);
 }
 
 async function loadBank() {
@@ -215,6 +226,7 @@ async function generatePuzzle() {
 
   generating = true;
   terminateWorker();
+  document.body.classList.remove("keyboard-open");
   puzzle = null;
   userLetters = [];
   selectedCell = null;
@@ -344,7 +356,7 @@ function renderPuzzle() {
   els.blackRate.textContent = `${Math.round(blackRatio * 100)}%`;
   updateProgress();
 
-  const firstSlot = slots[0];
+  const firstSlot = orderedSlots()[0];
   if (firstSlot) {
     activeSlotId = firstSlot.id;
     selectedCell = firstSlot.cells[0];
@@ -405,6 +417,30 @@ function selectSlot(slotId) {
   focusMobileInput();
 }
 
+function navigateClue(delta) {
+  if (!puzzle?.slots?.length) return;
+
+  const slots = orderedSlots();
+  const currentIndex = Math.max(0, slots.findIndex(slot => slot.id === activeSlotId));
+  const nextIndex = (currentIndex + delta + slots.length) % slots.length;
+  const nextSlot = slots[nextIndex];
+
+  activeSlotId = nextSlot.id;
+  selectedCell = nextSlot.cells.find(index => !userLetters[index]) ?? nextSlot.cells[0];
+  updateSelectionUI();
+  focusMobileInput();
+}
+
+function orderedSlots() {
+  if (!puzzle?.slots) return [];
+
+  return [...puzzle.slots].sort((a, b) => {
+    if (a.number !== b.number) return a.number - b.number;
+    if (a.direction === b.direction) return 0;
+    return a.direction === "across" ? -1 : 1;
+  });
+}
+
 function updateSelectionUI() {
   if (!puzzle) return;
 
@@ -424,12 +460,38 @@ function updateSelectionUI() {
   });
 
   if (slot) {
-    els.activeClueLabel.textContent = `${slot.number} · ${slot.direction === "across" ? "HORIZONTAL" : "VERTICAL"}`;
+    els.activeClueLabel.textContent = `${slot.direction === "across" ? "H" : "V"}${slot.number}.`;
     els.activeClueText.textContent = slot.word.dica;
-
-    const clueButton = document.querySelector(`.clue-button[data-slot-id="${CSS.escape(slot.id)}"]`);
-    clueButton?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    ensureSelectedCellVisible();
   }
+}
+
+function ensureSelectedCellVisible() {
+  if (selectedCell == null) return;
+
+  const cell = cellEls[selectedCell];
+  const scroller = els.boardWrap;
+  if (!cell || !scroller || cell.classList.contains("black")) return;
+
+  const cellRect = cell.getBoundingClientRect();
+  const scrollRect = scroller.getBoundingClientRect();
+  const margin = 12;
+  let left = scroller.scrollLeft;
+  let top = scroller.scrollTop;
+
+  if (cellRect.left < scrollRect.left + margin) {
+    left -= (scrollRect.left + margin) - cellRect.left;
+  } else if (cellRect.right > scrollRect.right - margin) {
+    left += cellRect.right - (scrollRect.right - margin);
+  }
+
+  if (cellRect.top < scrollRect.top + margin) {
+    top -= (scrollRect.top + margin) - cellRect.top;
+  } else if (cellRect.bottom > scrollRect.bottom - margin) {
+    top += cellRect.bottom - (scrollRect.bottom - margin);
+  }
+
+  scroller.scrollTo({ left, top, behavior: "smooth" });
 }
 
 function enterLetter(letter) {
@@ -597,6 +659,19 @@ function focusMobileInput() {
   } catch {
     els.mobileInput.focus();
   }
+
+  setTimeout(syncKeyboardMode, 80);
+}
+
+function syncKeyboardMode() {
+  const viewportHeight = window.visualViewport?.height || window.innerHeight;
+  maxViewportHeight = Math.max(maxViewportHeight, viewportHeight);
+
+  const keyboardOpen = window.matchMedia("(max-width: 840px)").matches
+    && document.activeElement === els.mobileInput
+    && maxViewportHeight - viewportHeight > 110;
+
+  document.body.classList.toggle("keyboard-open", keyboardOpen);
 }
 
 function setLoading(title, detail) {
@@ -607,6 +682,7 @@ function setLoading(title, detail) {
 function showError(message) {
   generating = false;
   terminateWorker();
+  document.body.classList.remove("keyboard-open");
   els.loadingView.hidden = true;
   els.gameView.hidden = true;
   els.errorView.hidden = false;
