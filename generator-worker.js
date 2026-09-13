@@ -5,412 +5,357 @@ self.onmessage = event => {
   if (data.type !== "generate") return;
 
   try {
-    const puzzle = generatePackedCrossword(data.words || [], data.options || {});
-
+    const puzzle = generateCrossword(data.words || [], data.options || {});
     if (!puzzle) {
       self.postMessage({
         type: "error",
-        message:
-          "Não consegui montar 30 respostas conectadas nesta tentativa. Clique em tentar novamente."
+        message: "Não consegui montar uma grade válida nesta tentativa. Tente gerar outra cruzada."
       });
       return;
     }
-
     self.postMessage({ type: "result", puzzle });
   } catch (error) {
-    self.postMessage({
-      type: "error",
-      message: error?.message || String(error)
-    });
+    self.postMessage({ type: "error", message: error?.message || String(error) });
   }
 };
 
-function generatePackedCrossword(rawWords, options) {
-  const minWords = Math.max(30, Number(options.minWords) || 30);
-  const targetWords = minWords;
-  const budgetMs = Math.max(3500, Number(options.timeBudgetMs) || 14000);
+function generateCrossword(rawWords, options) {
+  const targetWords = Math.max(24, Number(options.targetWords) || 30);
+  const requestedMin = Math.max(20, Number(options.minWords) || 28);
+  const budgetMs = Math.max(5000, Number(options.timeBudgetMs) || 16000);
   const seed = Number(options.seed) || Date.now();
   const deadline = performance.now() + budgetMs;
-  const allWords = normalizeWords(rawWords).filter(word => word.resposta.length <= 13);
+  const words = normalizeWords(rawWords).filter(w => w.resposta.length >= 3 && w.resposta.length <= 15);
 
-  if (allWords.length < minWords) {
-    throw new Error(`O banco possui apenas ${allWords.length} respostas utilizáveis de até 13 letras.`);
+  if (words.length < requestedMin) {
+    throw new Error(`O banco possui apenas ${words.length} respostas utilizáveis entre 3 e 15 letras.`);
   }
 
-  const byLetter = buildWordLetterStats(allWords);
-  const sizes = [13, 12, 11];
+  const letterFrequency = buildLetterFrequency(words);
+  const plans = [
+    { size: 15, attempts: 13 },
+    { size: 17, attempts: 16 },
+    { size: 19, attempts: 10 }
+  ];
+
   let best = null;
-  let attempt = 0;
+  let attemptNumber = 0;
 
-  for (const size of sizes) {
-    const attemptsForSize = size === 13 ? 10 : size === 12 ? 7 : 6;
-
-    for (let local = 0; local < attemptsForSize; local++) {
+  for (const plan of plans) {
+    for (let local = 0; local < plan.attempts; local++) {
       if (performance.now() >= deadline) break;
+      attemptNumber++;
+      const rng = mulberry32(seed + attemptNumber * 104729 + plan.size * 8191);
+      const candidate = buildAttempt(words, letterFrequency, plan.size, targetWords, rng, deadline, attemptNumber);
 
-      attempt++;
-      const rng = mulberry32(seed + attempt * 104729 + size * 8191);
-      const candidate = buildAttempt(allWords, byLetter, size, targetWords, rng, deadline);
-
-      if (!best || compareCandidate(candidate, best) > 0) {
-        best = candidate;
+      if (candidate && validateCandidate(candidate)) {
+        if (!best || compareCandidates(candidate, best) > 0) best = candidate;
+        postProgress(formatProgress(attemptNumber, candidate));
+        if (isExcellent(candidate, targetWords)) return buildPuzzle(candidate);
       }
-
-      postProgress(
-        `Tentativa ${attempt}: ${candidate.placements.length} palavras em ${size}×${size}, ` +
-        `${Math.round((1 - candidate.occupied / (size * size)) * 100)}% de blocos pretos.`
-      );
-
     }
 
-    // A referência visual tem aproximadamente 10–15% de casas pretas.
-    // Se já encontramos 30 palavras nessa faixa, usamos esse resultado.
-    if (
-      best?.placements.length >= minWords &&
-      best.blackRatio >= 0.07 &&
-      best.blackRatio <= 0.20
-    ) {
+    if (best?.placements.length >= targetWords && best.orientationDiff <= 2) {
       return buildPuzzle(best);
     }
   }
 
-  if (best?.placements.length >= minWords) {
-    return buildPuzzle(best);
-  }
-
+  if (best?.placements.length >= Math.min(requestedMin, targetWords)) return buildPuzzle(best);
+  if (best?.placements.length >= 20) return buildPuzzle(best);
   return null;
 }
 
 function normalizeWords(rawWords) {
   const result = [];
   const seen = new Set();
-
   for (const raw of rawWords) {
     if (raw?.ativo === false) continue;
-
     const resposta = normalizeAnswer(raw?.resposta || raw?.exibicao || "");
     const dica = String(raw?.dica || "").trim();
     const exibicao = String(raw?.exibicao || resposta).trim();
-
-    if (resposta.length < 2 || !dica || seen.has(resposta)) continue;
-
+    if (resposta.length < 3 || !dica || seen.has(resposta)) continue;
     seen.add(resposta);
-    result.push({
-      id: raw?.id ?? result.length + 1,
-      resposta,
-      exibicao,
-      dica
-    });
+    result.push({ id: raw?.id ?? result.length + 1, resposta, exibicao, dica });
   }
-
   return result;
 }
 
 function normalizeAnswer(value) {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase()
-    .replace(/[^A-Z]/g, "");
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z]/g, "");
 }
 
-function buildWordLetterStats(words) {
+function buildLetterFrequency(words) {
   const frequency = new Map();
-
   for (const word of words) {
-    const unique = new Set(word.resposta);
-    for (const letter of unique) {
+    for (const letter of new Set(word.resposta)) {
       frequency.set(letter, (frequency.get(letter) || 0) + 1);
     }
   }
-
   return frequency;
 }
 
-function buildAttempt(words, letterFrequency, size, targetWords, rng, deadline) {
-  const grid = Array.from({ length: size }, () => Array(size).fill(null));
-  const dirs = Array.from({ length: size }, () =>
-    Array.from({ length: size }, () => new Set())
-  );
-  const memberships = Array.from({ length: size * size }, () => []);
-  const letterCells = new Map();
-  const placements = [];
-  const used = new Set();
+function createState(size) {
+  return {
+    size,
+    grid: Array(size * size).fill(""),
+    dirs: new Uint8Array(size * size),
+    memberships: Array.from({ length: size * size }, () => []),
+    letterCells: new Map(),
+    placements: [],
+    used: new Set(),
+    acrossCount: 0,
+    downCount: 0,
+    bounds: null
+  };
+}
 
-  const eligibleSeeds = words
-    .filter(word => word.resposta.length >= 6 && word.resposta.length <= Math.min(11, size))
-    .map(word => ({
-      word,
-      score: seedScore(word, letterFrequency) + rng() * 4
-    }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, Math.min(80, words.length));
+function buildAttempt(words, letterFrequency, size, targetWords, rng, deadline, attemptNumber) {
+  const state = createState(size);
+  const seedWord = chooseSeedWord(words, letterFrequency, size, rng);
+  if (!seedWord) return finalizeCandidate(state);
 
-  const seedChoice = eligibleSeeds[Math.floor(rng() * Math.min(12, eligibleSeeds.length))]?.word;
-  const seedWord = seedChoice || words.find(word => word.resposta.length <= size);
+  const seedDirection = attemptNumber % 2 === 0 ? "across" : "down";
+  const center = Math.floor(size / 2);
+  const start = centeredStart(seedWord.resposta.length, size, seedDirection, center);
+  placeWord(state, seedWord, start.row, start.col, seedDirection);
 
-  if (!seedWord) {
-    return finalizeCandidate(size, grid, dirs, memberships, placements);
+  while (state.placements.length < targetWords && performance.now() < deadline) {
+    const candidates = collectTopCandidates(state, words, letterFrequency, rng, deadline);
+    if (!candidates.length) break;
+    const poolSize = Math.min(9, candidates.length);
+    const chosen = candidates[weightedTopIndex(poolSize, rng)];
+    placeWord(state, chosen.word, chosen.row, chosen.col, chosen.direction);
   }
 
-  const seedDir = rng() < 0.5 ? "across" : "down";
-  const center = Math.floor(size / 2);
-  const seedStart = centeredStart(seedWord.resposta.length, size, seedDir, center);
-  placeWord(seedWord, seedStart.row, seedStart.col, seedDir);
+  return finalizeCandidate(state);
+}
 
-  while (placements.length < targetWords && performance.now() < deadline) {
-    const remaining = [];
+function chooseSeedWord(words, frequency, size, rng) {
+  const candidates = words
+    .filter(w => w.resposta.length >= 6 && w.resposta.length <= Math.min(12, size))
+    .map(word => ({ word, score: seedScore(word, frequency) + rng() * 4 }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.min(90, words.length));
 
-    for (const word of words) {
-      if (used.has(word.resposta) || word.resposta.length > size) continue;
-      remaining.push(word);
-    }
+  if (!candidates.length) return words.find(w => w.resposta.length <= size) || null;
+  return candidates[Math.floor(rng() * Math.min(16, candidates.length))].word;
+}
 
-    shuffleInPlace(remaining, rng);
+function collectTopCandidates(state, words, frequency, rng, deadline) {
+  const remaining = words.filter(w => !state.used.has(w.resposta) && w.resposta.length <= state.size);
+  shuffleInPlace(remaining, rng);
+  const top = [];
+  const scanLimit = Math.min(remaining.length, 760);
 
-    const top = [];
-    const scanLimit = Math.min(remaining.length, 420);
+  for (let wi = 0; wi < scanLimit; wi++) {
+    if (performance.now() >= deadline) break;
+    const word = remaining[wi];
+    const answer = word.resposta;
+    const seenPlacements = new Set();
 
-    for (let wi = 0; wi < scanLimit; wi++) {
-      const word = remaining[wi];
-      const answer = word.resposta;
+    for (let pos = 0; pos < answer.length; pos++) {
+      const anchors = state.letterCells.get(answer[pos]);
+      if (!anchors?.length) continue;
 
-      for (let pos = 0; pos < answer.length; pos++) {
-        const anchors = letterCells.get(answer[pos]);
-        if (!anchors?.length) continue;
+      for (const cellIndex of anchors) {
+        const occupiedDirs = state.dirs[cellIndex];
+        const anchorRow = Math.floor(cellIndex / state.size);
+        const anchorCol = cellIndex % state.size;
+        const directions = [];
+        if ((occupiedDirs & 1) === 0) directions.push("across");
+        if ((occupiedDirs & 2) === 0) directions.push("down");
 
-        for (const cellIndex of anchors) {
-          const ar = Math.floor(cellIndex / size);
-          const ac = cellIndex % size;
+        for (const direction of directions) {
+          const { dr, dc } = directionVector(direction);
+          const row = anchorRow - dr * pos;
+          const col = anchorCol - dc * pos;
+          const key = `${row},${col},${direction}`;
+          if (seenPlacements.has(key)) continue;
+          seenPlacements.add(key);
 
-          for (const direction of ["across", "down"]) {
-            const dr = direction === "down" ? 1 : 0;
-            const dc = direction === "across" ? 1 : 0;
-            const row = ar - dr * pos;
-            const col = ac - dc * pos;
-            const evaluated = evaluatePlacement(word, row, col, direction);
-
-            if (!evaluated) continue;
-
-            insertTop(top, {
-              ...evaluated,
-              word,
-              row,
-              col,
-              direction
-            }, 18);
-          }
+          const evaluated = evaluatePlacement(state, word, row, col, direction, frequency, rng);
+          if (!evaluated) continue;
+          insertTop(top, { ...evaluated, word, row, col, direction }, 42);
         }
       }
     }
-
-    if (!top.length) break;
-
-    // Evita cair sempre no mesmo ótimo local: escolhe entre os melhores.
-    const selectionPool = top.slice(0, Math.min(7, top.length));
-    const choiceIndex = weightedTopIndex(selectionPool.length, rng);
-    const chosen = selectionPool[choiceIndex];
-
-    placeWord(chosen.word, chosen.row, chosen.col, chosen.direction);
   }
+  return top;
+}
 
-  return finalizeCandidate(size, grid, dirs, memberships, placements);
+function evaluatePlacement(state, word, row, col, direction, frequency, rng) {
+  const answer = word.resposta;
+  const { dr, dc, bit } = directionVector(direction);
+  const endRow = row + dr * (answer.length - 1);
+  const endCol = col + dc * (answer.length - 1);
+  if (!inside(state.size, row, col) || !inside(state.size, endRow, endCol)) return null;
 
-  function evaluatePlacement(word, row, col, direction) {
-    const answer = word.resposta;
-    const dr = direction === "down" ? 1 : 0;
-    const dc = direction === "across" ? 1 : 0;
+  const beforeRow = row - dr;
+  const beforeCol = col - dc;
+  const afterRow = endRow + dr;
+  const afterCol = endCol + dc;
 
-    const endRow = row + dr * (answer.length - 1);
-    const endCol = col + dc * (answer.length - 1);
+  if (inside(state.size, beforeRow, beforeCol) && state.grid[indexOf(state.size, beforeRow, beforeCol)]) return null;
+  if (inside(state.size, afterRow, afterCol) && state.grid[indexOf(state.size, afterRow, afterCol)]) return null;
 
-    if (
-      row < 0 || col < 0 ||
-      endRow < 0 || endCol < 0 ||
-      row >= size || col >= size ||
-      endRow >= size || endCol >= size
-    ) {
-      return null;
+  let crossings = 0;
+  let newCells = 0;
+  let futureValue = 0;
+
+  for (let i = 0; i < answer.length; i++) {
+    const r = row + dr * i;
+    const c = col + dc * i;
+    const index = indexOf(state.size, r, c);
+    const current = state.grid[index];
+
+    if (current) {
+      if (current !== answer[i]) return null;
+      if ((state.dirs[index] & bit) !== 0) return null;
+      crossings++;
+      continue;
     }
 
-    let crossings = 0;
-    let newCells = 0;
-    let adjacent = 0;
-    let edgeTouches = 0;
+    newCells++;
+    const sideNeighbors = direction === "across"
+      ? [[r - 1, c], [r + 1, c]]
+      : [[r, c - 1], [r, c + 1]];
 
-    for (let i = 0; i < answer.length; i++) {
-      const r = row + dr * i;
-      const c = col + dc * i;
-      const current = grid[r][c];
-
-      if (current && current !== answer[i]) return null;
-      if (dirs[r][c].has(direction)) return null;
-
-      if (current === answer[i]) {
-        crossings++;
-      } else {
-        newCells++;
-      }
-
-      if (r === 0 || r === size - 1 || c === 0 || c === size - 1) {
-        edgeTouches++;
-      }
-
-      // Recompensa preencher "buracos" entre casas já usadas.
-      for (const [nr, nc] of [[r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]]) {
-        if (nr < 0 || nr >= size || nc < 0 || nc >= size) continue;
-        if (grid[nr][nc]) adjacent++;
-      }
+    for (const [nr, nc] of sideNeighbors) {
+      if (!inside(state.size, nr, nc)) continue;
+      if (state.grid[indexOf(state.size, nr, nc)]) return null;
     }
 
-    if (crossings < 1) return null;
+    futureValue += Math.log1p(frequency.get(answer[i]) || 0);
+  }
 
-    // Evita uma palavra ser praticamente toda sobreposta.
-    if (newCells < Math.max(1, Math.floor(answer.length * 0.22))) return null;
+  if (crossings < 1 || newCells < 1) return null;
 
-    // Favorece múltiplos cruzamentos, compacidade e o preenchimento visual da grade.
-    let score =
-      crossings * 34 +
-      adjacent * 1.4 +
-      answer.length * 1.3 +
-      newCells * 0.45 -
-      edgeTouches * 0.15 +
-      rng() * 3;
+  const oldArea = boundsArea(state.bounds);
+  const newBounds = expandBounds(state.bounds, row, col, endRow, endCol);
+  const areaGrowth = Math.max(0, boundsArea(newBounds) - oldArea);
+  const oldDiff = Math.abs(state.acrossCount - state.downCount);
+  const nextAcross = state.acrossCount + (direction === "across" ? 1 : 0);
+  const nextDown = state.downCount + (direction === "down" ? 1 : 0);
+  const balanceGain = oldDiff - Math.abs(nextAcross - nextDown);
 
-    if (crossings >= 2) score += 18;
-    if (crossings >= 3) score += 22;
+  let score = crossings * 105 + Math.min(crossings, 4) * 14 + balanceGain * 44;
+  score += futureValue * 0.65 + Math.min(answer.length, 10) * 1.8;
+  score -= areaGrowth * 1.15 + newCells * 0.18;
+  if (crossings >= 2) score += 55;
+  if (crossings >= 3) score += 50;
 
-    // Depois de 20 palavras, passa a privilegiar ainda mais os múltiplos cruzamentos.
-    if (placements.length >= 20) {
-      score += crossings * 7;
-      score -= newCells * 0.18;
+  if (state.acrossCount > state.downCount + 1 && direction === "down") score += 75;
+  if (state.downCount > state.acrossCount + 1 && direction === "across") score += 75;
+  if (state.acrossCount > state.downCount + 2 && direction === "across") score -= 110;
+  if (state.downCount > state.acrossCount + 2 && direction === "down") score -= 110;
+
+  score += rng() * 10;
+  return { score, crossings, newCells };
+}
+
+function placeWord(state, word, row, col, direction) {
+  const answer = word.resposta;
+  const { dr, dc, bit } = directionVector(direction);
+  const slotId = `S${state.placements.length}`;
+  const cells = [];
+
+  for (let i = 0; i < answer.length; i++) {
+    const r = row + dr * i;
+    const c = col + dc * i;
+    const index = indexOf(state.size, r, c);
+
+    if (!state.grid[index]) {
+      state.grid[index] = answer[i];
+      if (!state.letterCells.has(answer[i])) state.letterCells.set(answer[i], []);
+      state.letterCells.get(answer[i]).push(index);
     }
 
-    return { score, crossings, newCells };
+    state.dirs[index] |= bit;
+    state.memberships[index].push(slotId);
+    cells.push(index);
   }
 
-  function placeWord(word, row, col, direction) {
-    const answer = word.resposta;
-    const dr = direction === "down" ? 1 : 0;
-    const dc = direction === "across" ? 1 : 0;
-    const slotId = `S${placements.length}`;
-    const cells = [];
+  state.placements.push({ id: slotId, row, col, direction, cells, word });
+  if (direction === "across") state.acrossCount++;
+  else state.downCount++;
 
-    for (let i = 0; i < answer.length; i++) {
-      const r = row + dr * i;
-      const c = col + dc * i;
-      const index = r * size + c;
-
-      if (!grid[r][c]) {
-        grid[r][c] = answer[i];
-        if (!letterCells.has(answer[i])) letterCells.set(answer[i], []);
-        letterCells.get(answer[i]).push(index);
-      }
-
-      dirs[r][c].add(direction);
-      memberships[index].push(slotId);
-      cells.push(index);
-    }
-
-    placements.push({
-      id: slotId,
-      row,
-      col,
-      direction,
-      cells,
-      word
-    });
-
-    used.add(answer);
-  }
+  const endRow = row + dr * (answer.length - 1);
+  const endCol = col + dc * (answer.length - 1);
+  state.bounds = expandBounds(state.bounds, row, col, endRow, endCol);
+  state.used.add(answer);
 }
 
-function seedScore(word, frequency) {
-  let score = 0;
-  const unique = new Set(word.resposta);
-
-  for (const letter of unique) {
-    score += Math.log1p(frequency.get(letter) || 0);
-  }
-
-  return score + word.resposta.length * 0.25;
-}
-
-function centeredStart(length, size, direction, center) {
-  if (direction === "across") {
-    return {
-      row: center,
-      col: Math.max(0, Math.floor((size - length) / 2))
-    };
-  }
-
-  return {
-    row: Math.max(0, Math.floor((size - length) / 2)),
-    col: center
-  };
-}
-
-function insertTop(list, candidate, limit) {
-  let index = 0;
-  while (index < list.length && list[index].score >= candidate.score) index++;
-  list.splice(index, 0, candidate);
-  if (list.length > limit) list.length = limit;
-}
-
-function weightedTopIndex(length, rng) {
-  if (length <= 1) return 0;
-  const weights = Array.from({ length }, (_, i) => length - i);
-  const total = weights.reduce((a, b) => a + b, 0);
-  let roll = rng() * total;
-
-  for (let i = 0; i < weights.length; i++) {
-    roll -= weights[i];
-    if (roll <= 0) return i;
-  }
-
-  return 0;
-}
-
-function finalizeCandidate(size, grid, dirs, memberships, placements) {
+function finalizeCandidate(state) {
   let occupied = 0;
   let crossings = 0;
+  let totalLetters = 0;
+  let wordsWithTwoOrMoreCrossings = 0;
+  let wordsWithOneCrossing = 0;
 
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      if (grid[r][c]) occupied++;
-      if (dirs[r][c].size >= 2) crossings++;
-    }
+  for (let i = 0; i < state.grid.length; i++) {
+    if (state.grid[i]) occupied++;
+    if (state.dirs[i] === 3) crossings++;
   }
 
-  return {
-    size,
-    grid,
-    dirs,
-    memberships,
-    placements,
-    occupied,
-    crossings,
-    blackRatio: 1 - occupied / (size * size)
-  };
+  for (const placement of state.placements) {
+    totalLetters += placement.cells.length;
+    const wordCrossings = placement.cells.reduce((n, i) => n + (state.dirs[i] === 3 ? 1 : 0), 0);
+    if (wordCrossings >= 2) wordsWithTwoOrMoreCrossings++;
+    else if (wordCrossings === 1) wordsWithOneCrossing++;
+  }
+
+  const compactness = occupied / (boundsArea(state.bounds) || state.size * state.size);
+  const checkedRatio = totalLetters ? (crossings * 2) / totalLetters : 0;
+  const orientationDiff = Math.abs(state.acrossCount - state.downCount);
+  const blackRatio = 1 - occupied / (state.size * state.size);
+
+  return { ...state, occupied, crossings, compactness, checkedRatio, orientationDiff, blackRatio, wordsWithTwoOrMoreCrossings, wordsWithOneCrossing };
 }
 
-function compareCandidate(a, b) {
-  if (!b) return 1;
+function compareCandidates(a, b) {
+  if (a.placements.length !== b.placements.length) return a.placements.length - b.placements.length;
+  if (a.orientationDiff !== b.orientationDiff) return b.orientationDiff - a.orientationDiff;
+  if (a.wordsWithTwoOrMoreCrossings !== b.wordsWithTwoOrMoreCrossings) return a.wordsWithTwoOrMoreCrossings - b.wordsWithTwoOrMoreCrossings;
+  if (Math.abs(a.checkedRatio - b.checkedRatio) > 0.01) return a.checkedRatio - b.checkedRatio;
+  if (a.crossings !== b.crossings) return a.crossings - b.crossings;
+  return a.compactness - b.compactness;
+}
 
-  if (a.placements.length !== b.placements.length) {
-    return a.placements.length - b.placements.length;
+function isExcellent(candidate, targetWords) {
+  return candidate.placements.length >= targetWords && candidate.orientationDiff <= 2 && candidate.checkedRatio >= 0.32;
+}
+
+function validateCandidate(candidate) {
+  if (!candidate?.placements?.length) return false;
+  const expected = new Set(candidate.placements.map(p => `${p.direction}:${p.cells[0]}:${p.cells.length}`));
+
+  for (const direction of ["across", "down"]) {
+    const { dr, dc } = directionVector(direction);
+    for (let r = 0; r < candidate.size; r++) {
+      for (let c = 0; c < candidate.size; c++) {
+        const first = indexOf(candidate.size, r, c);
+        if (!candidate.grid[first]) continue;
+        const pr = r - dr;
+        const pc = c - dc;
+        if (inside(candidate.size, pr, pc) && candidate.grid[indexOf(candidate.size, pr, pc)]) continue;
+
+        const cells = [];
+        let rr = r;
+        let cc = c;
+        while (inside(candidate.size, rr, cc)) {
+          const index = indexOf(candidate.size, rr, cc);
+          if (!candidate.grid[index]) break;
+          cells.push(index);
+          rr += dr;
+          cc += dc;
+        }
+
+        if (cells.length < 2) continue;
+        if (!expected.has(`${direction}:${cells[0]}:${cells.length}`)) return false;
+      }
+    }
   }
-
-  const targetBlack = 0.12;
-  const aDistance = Math.abs(a.blackRatio - targetBlack);
-  const bDistance = Math.abs(b.blackRatio - targetBlack);
-
-  // Prioriza a aparência semelhante à referência; depois, mais cruzamentos reais.
-  if (Math.abs(aDistance - bDistance) > 0.015) {
-    return bDistance - aDistance;
-  }
-
-  return a.crossings - b.crossings;
+  return true;
 }
 
 function buildPuzzle(candidate) {
@@ -419,16 +364,9 @@ function buildPuzzle(candidate) {
 
   for (let r = 0; r < size; r++) {
     for (let c = 0; c < size; c++) {
-      const index = r * size + c;
-      const solution = grid[r][c] || "";
-
-      cells.push({
-        row: r,
-        col: c,
-        block: !solution,
-        solution,
-        slotIds: solution ? [...memberships[index]] : []
-      });
+      const index = indexOf(size, r, c);
+      const solution = grid[index] || "";
+      cells.push({ row: r, col: c, block: !solution, solution, slotIds: solution ? [...memberships[index]] : [] });
     }
   }
 
@@ -437,10 +375,7 @@ function buildPuzzle(candidate) {
     const start = placement.cells[0];
     if (!startMap.has(start)) startMap.set(start, null);
   }
-
-  [...startMap.keys()]
-    .sort((a, b) => a - b)
-    .forEach((cellIndex, i) => startMap.set(cellIndex, i + 1));
+  [...startMap.keys()].sort((a, b) => a - b).forEach((cellIndex, i) => startMap.set(cellIndex, i + 1));
 
   const slots = placements.map(placement => ({
     id: placement.id,
@@ -456,22 +391,83 @@ function buildPuzzle(candidate) {
     }
   }));
 
-  slots.sort((a, b) => {
-    if (a.number !== b.number) return a.number - b.number;
-    return a.direction === "across" ? -1 : 1;
-  });
+  slots.sort((a, b) => a.number !== b.number ? a.number - b.number : (a.direction === "across" ? -1 : 1));
 
   return {
     rows: size,
     cols: size,
     cells,
     slots,
-    blackRatio: candidate.blackRatio
+    blackRatio: candidate.blackRatio,
+    stats: {
+      across: candidate.acrossCount,
+      down: candidate.downCount,
+      crossings: candidate.crossings,
+      checkedRatio: candidate.checkedRatio,
+      compactness: candidate.compactness
+    }
   };
 }
 
-function postProgress(message) {
-  self.postMessage({ type: "progress", message });
+function seedScore(word, frequency) {
+  let score = word.resposta.length * 0.35;
+  for (const letter of new Set(word.resposta)) score += Math.log1p(frequency.get(letter) || 0);
+  return score;
+}
+
+function centeredStart(length, size, direction, center) {
+  return direction === "across"
+    ? { row: center, col: Math.max(0, Math.floor((size - length) / 2)) }
+    : { row: Math.max(0, Math.floor((size - length) / 2)), col: center };
+}
+
+function directionVector(direction) {
+  return direction === "across" ? { dr: 0, dc: 1, bit: 1 } : { dr: 1, dc: 0, bit: 2 };
+}
+
+function inside(size, row, col) {
+  return row >= 0 && row < size && col >= 0 && col < size;
+}
+
+function indexOf(size, row, col) {
+  return row * size + col;
+}
+
+function expandBounds(bounds, row, col, endRow, endCol) {
+  const minRow = Math.min(row, endRow);
+  const maxRow = Math.max(row, endRow);
+  const minCol = Math.min(col, endCol);
+  const maxCol = Math.max(col, endCol);
+  if (!bounds) return { minRow, maxRow, minCol, maxCol };
+  return {
+    minRow: Math.min(bounds.minRow, minRow),
+    maxRow: Math.max(bounds.maxRow, maxRow),
+    minCol: Math.min(bounds.minCol, minCol),
+    maxCol: Math.max(bounds.maxCol, maxCol)
+  };
+}
+
+function boundsArea(bounds) {
+  return bounds ? (bounds.maxRow - bounds.minRow + 1) * (bounds.maxCol - bounds.minCol + 1) : 0;
+}
+
+function insertTop(list, candidate, limit) {
+  let index = 0;
+  while (index < list.length && list[index].score >= candidate.score) index++;
+  list.splice(index, 0, candidate);
+  if (list.length > limit) list.length = limit;
+}
+
+function weightedTopIndex(length, rng) {
+  if (length <= 1) return 0;
+  const weights = Array.from({ length }, (_, i) => (length - i) ** 1.7);
+  const total = weights.reduce((sum, value) => sum + value, 0);
+  let roll = rng() * total;
+  for (let i = 0; i < weights.length; i++) {
+    roll -= weights[i];
+    if (roll <= 0) return i;
+  }
+  return 0;
 }
 
 function shuffleInPlace(array, rng) {
@@ -483,13 +479,20 @@ function shuffleInPlace(array, rng) {
 }
 
 function mulberry32(seed) {
-  let a = seed >>> 0;
-
-  return function () {
-    a |= 0;
-    a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  let value = seed >>> 0;
+  return function random() {
+    value += 0x6D2B79F5;
+    let t = value;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+function formatProgress(attemptNumber, candidate) {
+  return `Tentativa ${attemptNumber}: ${candidate.placements.length} palavras (${candidate.acrossCount}H/${candidate.downCount}V), ${candidate.crossings} cruzamentos em ${candidate.size}×${candidate.size}.`;
+}
+
+function postProgress(message) {
+  self.postMessage({ type: "progress", message });
 }
