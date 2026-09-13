@@ -106,7 +106,8 @@ h2 {
 
 .button:focus-visible,
 .cell:focus-visible,
-.clue-button:focus-visible {
+.clue-button:focus-visible,
+.clue-nav:focus-visible {
   outline: 3px solid rgba(31, 79, 70, 0.28);
   outline-offset: 2px;
 }
@@ -186,6 +187,7 @@ h2 {
 .board-wrap {
   overflow: auto;
   padding: 10px;
+  overscroll-behavior: contain;
 }
 
 .board {
@@ -253,14 +255,42 @@ h2 {
 }
 
 .active-clue {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 48px;
+  align-items: stretch;
+  min-height: 82px;
   margin-top: 10px;
-  padding: 12px 14px;
-  min-height: 76px;
+  overflow: hidden;
+  background: #e8edf5;
+}
+
+.active-clue-copy {
+  min-width: 0;
+  padding: 12px 8px;
+  align-self: center;
 }
 
 .active-clue p {
   margin-bottom: 0;
-  line-height: 1.45;
+  line-height: 1.4;
+  font-size: clamp(0.98rem, 2.6vw, 1.08rem);
+}
+
+.clue-nav {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 2.25rem;
+  line-height: 1;
+  font-weight: 500;
+}
+
+.clue-nav:hover {
+  background: rgba(255, 255, 255, 0.45);
 }
 
 .controls {
@@ -369,6 +399,11 @@ h2 {
 
   .board-wrap {
     padding: 5px;
+    max-height: 56dvh;
+  }
+
+  .active-clue {
+    margin-top: 6px;
   }
 }
 
@@ -397,5 +432,43 @@ h2 {
 
   .clues {
     padding: 12px;
+  }
+
+  .active-clue {
+    grid-template-columns: 42px minmax(0, 1fr) 42px;
+    min-height: 76px;
+  }
+
+  .clue-nav {
+    font-size: 2rem;
+  }
+}
+
+@media (max-width: 840px) {
+  body.keyboard-open .app-shell {
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+
+  body.keyboard-open .topbar,
+  body.keyboard-open .board-toolbar,
+  body.keyboard-open .controls,
+  body.keyboard-open .clues {
+    display: none;
+  }
+
+  body.keyboard-open .game-layout {
+    display: block;
+  }
+
+  body.keyboard-open .board-wrap {
+    max-height: calc(100dvh - 104px);
+    padding: 3px;
+  }
+
+  body.keyboard-open .active-clue {
+    min-height: 92px;
+    margin-top: 4px;
+    bottom: 0;
   }
 }
